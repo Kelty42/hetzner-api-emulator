@@ -1,0 +1,9 @@
+export HOST=0.0.0.0
+export PORT=8081
+export DB_CONNECTION=postgres
+export DB_HOST=db
+export DB_PORT=5432
+export DB_NAME=hetzner_api_emulator
+export DB_USER=your_db_user
+export DB_PASSWORD=your_db_password
+export DB_HOST=localhost
