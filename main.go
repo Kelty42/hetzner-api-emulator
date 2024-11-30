@@ -1,41 +1,41 @@
 package main
 
 import (
+	"flag"
 	"log"
 	"net/http"
 
 	"hetzner-api-emulator/config"
 	"hetzner-api-emulator/database"
+	"hetzner-api-emulator/models"
 	"hetzner-api-emulator/middlewares"
 	"hetzner-api-emulator/routes" // Правильный импорт пакета routes
 	"github.com/gin-gonic/gin"
 )
 
 func main() {
-	// Загружаем конфигурацию
+	// Добавляем флаг для миграции
+	migrateFlag := flag.Bool("migration", false, "Run migrations")
+	flag.Parse()
 	cfg := config.LoadConfig()
+	// Если флаг миграции установлен, выполняем миграции и выходим
+	if *migrateFlag {
 
-	// Инициализируем подключение к базе данных
-	db, status, code, message := database.InitDB(cfg)
-	if status != http.StatusOK {
-		// Логируем ошибку
-		log.Printf("Error: %s - %s", code, message)
+		// Инициализируем подключение к базе данных
+		database.ConnectDatabase()
 
-		// Создаем роутер Gin
-		router := gin.Default()
+		// Получаем соединение с БД
+		db := database.GetDB()
 
-		// Обработчик ошибок
-		router.Use(middlewares.ErrorHandler())
+		// Запускаем миграции
+		models.Migrate(db)
 
-		// Отправляем ошибку
-		router.NoRoute(func(c *gin.Context) {
-			middlewares.RespondWithError(c, status, code, message)
-		})
-
-		// Прекращаем выполнение, если ошибка подключения
-		router.Run(cfg.Host + ":" + cfg.Port)
+		log.Println("Migrations completed successfully")
 		return
 	}
+
+	// Инициализируем подключение к базе данных
+	database.ConnectDatabase()
 
 	// Создаем роутер Gin
 	router := gin.Default()
@@ -49,10 +49,10 @@ func main() {
 	router.Use(middlewares.ErrorHandler())
 
 	// Добавляем middleware авторизации с указанием типа базы данных
-	authorized := router.Group("/", middlewares.DBAuthMiddleware(db, cfg.DBType))
+	authorized := router.Group("/", middlewares.DBAuthMiddleware(database.GetDB()))
 
 	// Регистрируем все маршруты через RegisterAllRoutes
-	routes.RegisterAllRoutes(authorized, db, cfg.DBType) // Используем правильный вызов из пакета routes
+	routes.RegisterAllRoutes(authorized, database.GetDB(), cfg.DBType) // Используем правильный вызов из пакета routes
 
 	// Запускаем сервер
 	addr := cfg.Host + ":" + cfg.Port

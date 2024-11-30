@@ -1,19 +1,26 @@
 package middlewares
 
 import (
-	"database/sql"
 	"encoding/base64"
+	"hetzner-api-emulator/models"
 	"log"
 	"net/http"
 	"strings"
 
-	"golang.org/x/crypto/bcrypt"
 	"github.com/gin-gonic/gin"
+	"golang.org/x/crypto/bcrypt"
+	"gorm.io/gorm"
 )
 
 // DBAuthMiddleware проверяет базовую авторизацию с использованием базы данных
-func DBAuthMiddleware(db *sql.DB, dbType string) gin.HandlerFunc {
+func DBAuthMiddleware(db *gorm.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		// Пропускаем авторизацию для маршрута регистрации
+		if c.Request.URL.Path == "/register" {
+			c.Next()
+			return
+		}
+
 		// Получаем значение авторизации из заголовка
 		authHeader := c.GetHeader("Authorization")
 		if authHeader == "" {
@@ -54,46 +61,28 @@ func DBAuthMiddleware(db *sql.DB, dbType string) gin.HandlerFunc {
 			return
 		}
 		username := credentials[0]
-		password := strings.TrimSpace(credentials[1]) // Убираем пробелы из пароля
+		password := strings.TrimSpace(credentials[1])
 
-		// Формируем запрос в зависимости от типа базы данных
-		var query string
-		switch dbType {
-		case "mysql":
-			query = "SELECT id, password FROM users WHERE username = ?"
-		case "postgres":
-			query = "SELECT id, password FROM users WHERE username = $1"
-		default:
-			log.Println("Unsupported database type")
-			SetError(c, "UNSUPPORTED_DB_TYPE", http.StatusInternalServerError)
-			RespondWithError(c, http.StatusInternalServerError, "UNSUPPORTED_DB_TYPE", "Unsupported database type")
-			c.Abort()
-			return
-		}
+		// Логируем полученные данные для отладки
+		log.Printf("Decoded credentials: username=%s, password=%s", username, password)
 
-		// Выполняем запрос к базе данных
-		var userID int
-		var storedPasswordHash string
-		err = db.QueryRow(query, username).Scan(&userID, &storedPasswordHash)
+		// Поиск пользователя в базе данных
+		var user models.User
+
+		err = db.Where("username = ?", username).First(&user).Error
 		if err != nil {
-			if err == sql.ErrNoRows {
-				log.Println("User not found in the database")
-				SetError(c, "INVALID_USERNAME_PASSWORD", http.StatusUnauthorized)
-				RespondWithError(c, http.StatusUnauthorized, "INVALID_USERNAME_PASSWORD", "Invalid username or password")
-				c.Abort()
-				return
-			}
-			log.Printf("Database query error: %v", err)
-			SetError(c, "DB_QUERY_ERROR", http.StatusInternalServerError)
-			RespondWithError(c, http.StatusInternalServerError, "DB_QUERY_ERROR", "Database error")
+			log.Println("User not found or database error")
+			SetError(c, "INVALID_USERNAME_PASSWORD", http.StatusUnauthorized)
+			RespondWithError(c, http.StatusUnauthorized, "INVALID_USERNAME_PASSWORD", "Invalid username or password")
 			c.Abort()
 			return
 		}
 
 		// Проверяем пароль
-		err = bcrypt.CompareHashAndPassword([]byte(storedPasswordHash), []byte(password))
+		err = bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(password))
 		if err != nil {
-			log.Printf("Password verification failed: %v", err)
+			log.Printf("Password verification failed: expected hash=%s, got password=%s", user.Password, password)
+			log.Printf("Error: %v", err)
 			SetError(c, "INVALID_USERNAME_PASSWORD", http.StatusUnauthorized)
 			RespondWithError(c, http.StatusUnauthorized, "INVALID_USERNAME_PASSWORD", "Invalid username or password")
 			c.Abort()
@@ -102,7 +91,7 @@ func DBAuthMiddleware(db *sql.DB, dbType string) gin.HandlerFunc {
 
 		// Аутентификация прошла успешно, сохраняем user_id в контексте
 		log.Printf("Authentication successful for user: %s", username)
-		c.Set("user_id", userID) // Добавляем user_id в контекст
+		c.Set("user_id", user.ID) // Добавляем user_id в контекст
 		c.Next()
 	}
 }

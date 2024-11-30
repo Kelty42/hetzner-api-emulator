@@ -1,50 +1,64 @@
 package database
 
 import (
-	"database/sql"
 	"fmt"
-	"hetzner-api-emulator/config"
-	"hetzner-api-emulator/middlewares"
 	"log"
 	"net/http"
+	"os"
 
-	_ "github.com/go-sql-driver/mysql" // MySQL драйвер
-	_ "github.com/lib/pq"              // PostgreSQL драйвер
+	"hetzner-api-emulator/middlewares"
+
+	"gorm.io/driver/mysql"
+	"gorm.io/driver/postgres"
+	"gorm.io/gorm"
 )
 
-// InitDB инициализирует подключение к базе данных
-func InitDB(cfg *config.Config) (*sql.DB, int, string, string) {
+var db *gorm.DB
+
+func ConnectDatabase() {
+	dbConnection := os.Getenv("DB_CONNECTION")
 	var dsn string
+	var dialector gorm.Dialector
 
-	// Формируем строку подключения в зависимости от типа базы данных
-	switch cfg.DBType {
+	switch dbConnection {
 	case "mysql":
-		dsn = fmt.Sprintf("%s:%s@tcp(%s:%s)/%s",
-			cfg.DBUser, cfg.DBPassword, cfg.DBHost, cfg.DBPort, cfg.DBName)
+		dsn = fmt.Sprintf(
+			"%s:%s@tcp(%s:%s)/%s?charset=utf8mb4&parseTime=True&loc=Local",
+			os.Getenv("DB_USER"),
+			os.Getenv("DB_PASSWORD"),
+			os.Getenv("DB_HOST"),
+			os.Getenv("DB_PORT"),
+			os.Getenv("DB_NAME"),
+		)
+		dialector = mysql.Open(dsn)
+
 	case "postgres":
-		dsn = fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable",
-			cfg.DBHost, cfg.DBPort, cfg.DBUser, cfg.DBPassword, cfg.DBName)
+		dsn = fmt.Sprintf(
+			"host=%s user=%s password=%s dbname=%s port=%s sslmode=disable TimeZone=UTC",
+			os.Getenv("DB_HOST"),
+			os.Getenv("DB_USER"),
+			os.Getenv("DB_PASSWORD"),
+			os.Getenv("DB_NAME"),
+			os.Getenv("DB_PORT"),
+		)
+		dialector = postgres.Open(dsn)
+
 	default:
-		return nil, http.StatusBadRequest, "UNSUPPORTED_DB_TYPE", fmt.Sprintf("Unsupported database type: %s", cfg.DBType)
+		middlewares.SetError(nil, "DB_UNSUPPORTED_TYPE", http.StatusInternalServerError)
+		panic("Invalid DB_CONNECTION configuration")
 	}
 
-	// Подключение к базе данных
-	db, err := sql.Open(cfg.DBType, dsn)
+	var err error
+	db, err = gorm.Open(dialector, &gorm.Config{})
 	if err != nil {
-		// Устанавливаем ошибку через middleware с правильным кодом и статусом
-		middlewares.SetError(nil, "DB_CONNECTION_FAILED", http.StatusInternalServerError)
-		log.Printf("Failed to open database connection: %v", err)
-		return nil, http.StatusInternalServerError, "DB_CONNECTION_FAILED", "Failed to open database connection"
-	}
-
-	// Проверяем подключение
-	if err := db.Ping(); err != nil {
-		// Устанавливаем ошибку через middleware с правильным кодом и статусом
-		middlewares.SetError(nil, "DB_PING_FAILED", http.StatusInternalServerError)
-		log.Printf("Failed to ping database: %v", err)
-		return nil, http.StatusInternalServerError, "DB_PING_FAILED", "Failed to establish a connection to the database"
+		middlewares.SetError(nil, "Failed to connect to database", http.StatusInternalServerError)
+		panic("Database connection error")
 	}
 
 	log.Println("Database connection established successfully")
-	return db, http.StatusOK, "", ""
+}
+
+// GetDB returns the active database connection
+func GetDB() *gorm.DB {
+	return db
 }

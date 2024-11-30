@@ -1,124 +1,70 @@
 package handlers
 
 import (
-	"encoding/json" // Добавляем для работы с JSON
-	"database/sql"
-	"log"
+	"errors"
+	"fmt"
+	"hetzner-api-emulator/middlewares"
+	"hetzner-api-emulator/models"
 	"net/http"
-	"strings"
+	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"hetzner-api-emulator/middlewares"
-	"hetzner-api-emulator/models" // Импортируем модель
+	"gorm.io/gorm"
 )
 
-// Обработчик для получения данных о сервере и отмене
-func GetServerCancellation(db *sql.DB, dbType string) gin.HandlerFunc {
+func GetServerCancellation(db *gorm.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		serverNumber := c.Param("server-number")
-
-		// Формируем запрос в зависимости от типа базы данных
-		var query string
-		switch dbType {
-		case "postgres":
-			query = `SELECT server_ip, server_ipv6_net, server_number, server_name, cancelled, reservation_possible, reserved, cancellation_date, cancellation_reason
-					  FROM servers WHERE server_number = $1`
-		case "mysql":
-			query = `SELECT server_ip, server_ipv6_net, server_number, server_name, cancelled, reservation_possible, reserved, cancellation_date, cancellation_reason
-					  FROM servers WHERE server_number = ?`
-		default:
-			middlewares.SetError(c, "INVALID_DB_TYPE", http.StatusInternalServerError)
-			middlewares.RespondWithError(c, http.StatusInternalServerError, "INVALID_DB_TYPE", "Invalid database type")
+		userId, err := middlewares.GetUserIDFromContext(c)
+		if err != nil || userId == 0 {
+			middlewares.RespondWithError(c, http.StatusBadRequest, "USER_ID_MISSING", "User ID is missing")
 			return
 		}
 
-		// Выполняем запрос к базе данных
-		var serverData models.ServerDataCancellation
-		err := db.QueryRow(query, serverNumber).Scan(
-			&serverData.ServerIP,
-			&serverData.ServerIPv6Net,
-			&serverData.ServerNumber,
-			&serverData.ServerName,
-			&serverData.Cancelled,
-			&serverData.ReservationPossible,
-			&serverData.Reserved,
-			&serverData.CancellationDate,
-			&serverData.CancellationReason,
-		)
+		serverNumberStr := c.Param("server-number")
+		serverNumber, err := strconv.Atoi(serverNumberStr)
 		if err != nil {
-			if err == sql.ErrNoRows {
-				middlewares.SetError(c, "SERVER_NOT_FOUND", http.StatusNotFound)
-				middlewares.RespondWithError(c, http.StatusNotFound, "SERVER_NOT_FOUND", "Server with id "+serverNumber+" not found")
+			middlewares.RespondWithError(c, http.StatusBadRequest, "INVALID_SERVER_NUMBER", "Invalid server number format")
+			return
+		}
+
+		var server models.Server
+		if err := db.Where("user_id = ? AND server_number = ?", userId, serverNumber).First(&server).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				middlewares.RespondWithError(c, http.StatusNotFound, "SERVER_NOT_FOUND", fmt.Sprintf("Server with number %d not found", serverNumber))
 				return
 			}
-			log.Printf("Error querying database: %v", err)
-			middlewares.SetError(c, "DB_QUERY_ERROR", http.StatusInternalServerError)
-			middlewares.RespondWithError(c, http.StatusInternalServerError, "DB_QUERY_ERROR", "Error retrieving server data")
+			middlewares.RespondWithError(c, http.StatusInternalServerError, "DATABASE_ERROR", "Database error")
 			return
 		}
 
-		// Статичная дата отмены через 7 дней
-		sevenDaysFromNow := time.Now().Add(7 * time.Hour * 24).Format("2006-01-02")
+		// Расчёт даты отмены
+		earliestCancellationDate := time.Now().AddDate(0, 0, 7).Format("2006-01-02")
 
-		// Если в названии продукта есть "DS", разрешаем резервирование
-		if containsDS(serverData.ServerName) {
-			serverData.ReservationPossible = true
-		} else {
-			serverData.ReservationPossible = false
-		}
-
+		// Определение cancellation_reason
 		var cancellationReason interface{}
-		if serverData.Cancelled {
-			if serverData.CancellationReason.Valid {
-				// Получаем строку причины
-				reasonStr := serverData.CancellationReason.String
-				
-				// Пробуем распарсить как JSON только если это действительно нужно
-				var reasons []string
-				if reasonStr[0] == '[' {
-					// Если строка выглядит как JSON-массив, распарсиваем её
-					err := json.Unmarshal([]byte(reasonStr), &reasons)
-					if err != nil {
-						log.Printf("Error unmarshalling cancellation reason: %v", err)
-						cancellationReason = reasonStr // В случае ошибки возвращаем как строку
-					} else {
-						cancellationReason = reasons
-					}
-				} else {
-					// Если это обычная строка, просто передаём её как строку
-					cancellationReason = reasonStr
-				}
-			} else {
-				cancellationReason = "" // Если причины нет, отправляем пустую строку
-			}
+		if server.Cancelled {
+			cancellationReason = server.CancellationReason // Причина из базы данных
 		} else {
-			// Если не отменён, передаём все возможные причины
-			cancellationReason = models.GetAllCancellationReasons()
+			cancellationReason = models.GetAllCancellationReasons() // Массив причин
 		}
-		
 
-
-
-		// Возвращаем данные о сервере в нужном формате
-		c.JSON(http.StatusOK, gin.H{
+		// Формируем ответ
+		response := gin.H{
 			"cancellation": gin.H{
-				"server_ip":               serverData.ServerIP,
-				"server_ipv6_net":         serverData.ServerIPv6Net,
-				"server_number":           serverData.ServerNumber,
-				"server_name":             serverData.ServerName,
-				"earliest_cancellation_date": sevenDaysFromNow, // Статичная дата
-				"cancelled":               serverData.Cancelled,
-				"reservation_possible":    serverData.ReservationPossible,
-				"reserved":                serverData.Reserved,
-				"cancellation_date":       serverData.CancellationDate.String, // Используем строку из sql.NullString
-				"cancellation_reason":     cancellationReason, // Строка или массив, в зависимости от отмены
+				"server_ip":                server.ServerIP,
+				"server_ipv6_net":          server.ServerIPv6Net,
+				"server_number":            server.ServerNumber,
+				"server_name":              server.ServerName,
+				"earliest_cancellation_date": earliestCancellationDate,
+				"cancelled":                server.Cancelled,
+				"reservation_possible":     server.ReservationPossible,
+				"reserved":                 server.Reserved,
+				"cancellation_date":        server.CancellationDate,
+				"cancellation_reason":      cancellationReason,
 			},
-		})
-	}
-}
+		}
 
-// Проверка, содержится ли DS в названии продукта
-func containsDS(productName string) bool {
-	return strings.Contains(productName, "DS")
+		c.JSON(http.StatusOK, response)
+	}
 }
